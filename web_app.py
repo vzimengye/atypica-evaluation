@@ -681,26 +681,26 @@ def render_case_content(case: Path) -> str:
       <h1>{html.escape(case_name)}</h1>
       <div class="badges">{status_badges(case)}</div>
       <div class="links">{render_download_links(case_name)}</div>
-      <form class="inline-form primary-action" method="post" action="/full-evaluation">
+      <form class="inline-form primary-action" method="post" action="/full-evaluation" data-loading-title="Full Evaluation Running" data-loading-message="AI Interview -> Judge -> Task Benchmark -> Stability -> Overall. Partial results appear as each step finishes.">
         <input type="hidden" name="case" value="{html.escape(case_name)}">
         <button type="submit">Run Full Evaluation</button>
       </form>
       <details class="advanced-actions">
         <summary>Advanced controls</summary>
         <div class="advanced-action-grid">
-      <form class="inline-form" method="post" action="/interview">
+      <form class="inline-form" method="post" action="/interview" data-loading-title="Running AI Interview" data-loading-message="The AI persona is answering the fixed Block 1-6 interview protocol.">
         <input type="hidden" name="case" value="{html.escape(case_name)}">
         <button type="submit">Run AI Interview</button>
       </form>
-      <form class="inline-form" method="post" action="/evaluate">
+      <form class="inline-form" method="post" action="/evaluate" data-loading-title="Running Judge" data-loading-message="Comparing the human interview PDF with the AI persona interview output using the qualitative rubric.">
         <input type="hidden" name="case" value="{html.escape(case_name)}">
         <button type="submit">Run Judge</button>
       </form>
-      <form class="inline-form" method="post" action="/benchmark">
+      <form class="inline-form" method="post" action="/benchmark" data-loading-title="Running Task Benchmark" data-loading-message="Generating and scoring matched decision tasks for the human case and AI persona.">
         <input type="hidden" name="case" value="{html.escape(case_name)}">
         <button type="submit">Run Task Benchmark</button>
       </form>
-      <form class="inline-form" method="post" action="/stability">
+      <form class="inline-form" method="post" action="/stability" data-loading-title="Running Stability Test" data-loading-message="Repeating the same task set to see whether the AI persona keeps stable decisions.">
         <input type="hidden" name="case" value="{html.escape(case_name)}">
         <button type="submit">Run Stability Test</button>
       </form>
@@ -787,6 +787,9 @@ def render_page(selected: str | None = None, error: str | None = None, notice: s
     if selected_case:
         content = render_case_content(selected_case)
     refresh_meta = "<meta http-equiv='refresh' content='5'>" if selected_case and is_job_running(selected_case) else ""
+    initial_running = bool(selected_case and is_job_running(selected_case))
+    initial_loading_title = "Full Evaluation Running"
+    initial_loading_message = "AI Interview -> Judge -> Task Benchmark -> Stability -> Overall. Partial results appear as each step finishes."
 
     page = f"""<!doctype html>
     <html lang="en">
@@ -833,6 +836,10 @@ def render_page(selected: str | None = None, error: str | None = None, notice: s
         }}
         .upload-form button {{ width: 100%; }}
         button:hover {{ background: #1d4ed8; }}
+        button:disabled {{
+          cursor: wait;
+          opacity: 0.72;
+        }}
         .hint {{ font-size: 12px; color: #687076; margin-top: 10px; }}
         .warning, .error, .notice {{
           border-radius: 8px;
@@ -1200,6 +1207,59 @@ def render_page(selected: str | None = None, error: str | None = None, notice: s
           padding: 40px;
           color: #687076;
         }}
+        .run-modal-backdrop {{
+          position: fixed;
+          inset: 0;
+          z-index: 100;
+          display: none;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          background: rgba(17, 24, 39, 0.52);
+          backdrop-filter: blur(3px);
+        }}
+        .run-modal-backdrop.visible {{
+          display: flex;
+        }}
+        .run-modal {{
+          width: min(440px, 100%);
+          border: 1px solid #d5dbe7;
+          border-radius: 8px;
+          background: #ffffff;
+          padding: 24px;
+          box-shadow: 0 22px 70px rgba(17, 24, 39, 0.28);
+        }}
+        .run-modal-head {{
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          margin-bottom: 12px;
+        }}
+        .run-modal h2 {{
+          font-size: 20px;
+        }}
+        .run-modal p {{
+          color: #4b5563;
+          line-height: 1.55;
+          margin: 0 0 14px;
+        }}
+        .run-modal small {{
+          display: block;
+          color: #687076;
+          line-height: 1.45;
+        }}
+        .spinner {{
+          width: 30px;
+          height: 30px;
+          flex: 0 0 30px;
+          border-radius: 50%;
+          border: 3px solid #dbeafe;
+          border-top-color: #2563eb;
+          animation: spin 0.8s linear infinite;
+        }}
+        @keyframes spin {{
+          to {{ transform: rotate(360deg); }}
+        }}
         @media (max-width: 860px) {{
           .app {{ grid-template-columns: 1fr; }}
           aside {{ position: relative; height: auto; }}
@@ -1217,7 +1277,7 @@ def render_page(selected: str | None = None, error: str | None = None, notice: s
           {warning}
           {error_html}
           {notice_html}
-          <form class="upload-form" method="post" action="/upload" enctype="multipart/form-data">
+          <form class="upload-form" method="post" action="/upload" enctype="multipart/form-data" data-loading-title="Generating Persona" data-loading-message="Extracting the PDF and generating the structured schema, persona card, and simulation prompt.">
             <input type="file" name="pdf" accept="application/pdf,.pdf" required>
             <button type="submit">Generate Persona</button>
             <div class="hint">Generation waits for the API response. It can take a minute.</div>
@@ -1227,6 +1287,53 @@ def render_page(selected: str | None = None, error: str | None = None, notice: s
         </aside>
         <main>{content}</main>
       </div>
+      <div
+        class="run-modal-backdrop"
+        id="run-modal"
+        role="status"
+        aria-live="polite"
+        aria-hidden="true"
+        data-initial-running="{str(initial_running).lower()}"
+        data-initial-title="{html.escape(initial_loading_title)}"
+        data-initial-message="{html.escape(initial_loading_message)}"
+      >
+        <div class="run-modal" aria-label="Task is running">
+          <div class="run-modal-head">
+            <div class="spinner" aria-hidden="true"></div>
+            <h2 id="run-modal-title">Running</h2>
+          </div>
+          <p id="run-modal-message">This may take a few minutes. Please keep this page open.</p>
+          <small>The page will update when the current step finishes.</small>
+        </div>
+      </div>
+      <script>
+        const runModal = document.getElementById("run-modal");
+        const runModalTitle = document.getElementById("run-modal-title");
+        const runModalMessage = document.getElementById("run-modal-message");
+
+        function showRunModal(title, message) {{
+          if (!runModal) return;
+          runModalTitle.textContent = title || "Running";
+          runModalMessage.textContent = message || "This may take a few minutes. Please keep this page open.";
+          runModal.classList.add("visible");
+          runModal.setAttribute("aria-hidden", "false");
+        }}
+
+        document.querySelectorAll("form[data-loading-title]").forEach((form) => {{
+          form.addEventListener("submit", () => {{
+            const submitButton = form.querySelector("button[type='submit']");
+            if (submitButton) {{
+              submitButton.disabled = true;
+              submitButton.textContent = form.dataset.loadingTitle || "Running";
+            }}
+            showRunModal(form.dataset.loadingTitle, form.dataset.loadingMessage);
+          }});
+        }});
+
+        if (runModal && runModal.dataset.initialRunning === "true") {{
+          showRunModal(runModal.dataset.initialTitle, runModal.dataset.initialMessage);
+        }}
+      </script>
     </body>
     </html>"""
     return page.encode("utf-8")
