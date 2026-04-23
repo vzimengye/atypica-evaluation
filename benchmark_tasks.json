@@ -1,0 +1,85 @@
+{
+  "version": "v2.1",
+  "description": "Fixed task benchmark for consumer decision-making simulation. These tasks are generic enough to apply across purchase/service decision interviews.",
+  "tasks": [
+    {
+      "id": "consider_original_choice",
+      "type": "classification",
+      "question": "In the original decision context, would the respondent seriously consider the final chosen product/service/option?",
+      "options": ["yes", "maybe", "no"]
+    },
+    {
+      "id": "abandon_on_repeated_negative_reviews",
+      "type": "classification",
+      "question": "Would repeated credible negative reviews or warning comments make the respondent abandon an option?",
+      "options": ["yes", "maybe", "no"]
+    },
+    {
+      "id": "trust_friend_over_online_rating",
+      "type": "classification",
+      "question": "If a trusted friend says the option is bad but online ratings are high, who does the respondent trust more?",
+      "options": ["trusted_person", "online_rating", "depends_or_unclear"]
+    },
+    {
+      "id": "purchase_intent_original",
+      "type": "continuous",
+      "question": "How strong is the respondent's purchase/commitment intent in the original scenario?",
+      "scale_min": 0,
+      "scale_max": 10
+    },
+    {
+      "id": "price_sensitivity",
+      "type": "continuous",
+      "question": "How price-sensitive is the respondent in this category?",
+      "scale_min": 0,
+      "scale_max": 10
+    },
+    {
+      "id": "friction_sensitivity",
+      "type": "continuous",
+      "question": "How sensitive is the respondent to waiting time, purchase friction, or process complexity?",
+      "scale_min": 0,
+      "scale_max": 10
+    },
+    {
+      "id": "trust_signal_ranking",
+      "type": "ranking",
+      "question": "Rank these trust signals from most persuasive to least persuasive for this respondent.",
+      "items": ["trusted_person_experience", "peer_user_reviews", "expert_or_influencer_review", "official_claim_or_report", "perfect_positive_reviews"]
+    },
+    {
+      "id": "barrier_ranking",
+      "type": "ranking",
+      "question": "Rank these barriers from most likely to make the respondent abandon an option to least likely.",
+      "items": ["core_effect_or_performance_problem", "credible_negative_reviews", "high_price", "long_wait_or_complex_process", "size_or_practical_fit_issue"]
+    },
+    {
+      "id": "main_hesitation",
+      "type": "open",
+      "question": "What is the respondent's main hesitation or concern in this kind of decision?"
+    },
+    {
+      "id": "persuasion_path",
+      "type": "open",
+      "question": "What kind of information or proof is most likely to persuade the respondent?"
+    },
+    {
+      "id": "price_increase_20",
+      "type": "counterfactual",
+      "question": "If the option became 20% more expensive, how would the respondent's likelihood of choosing it change?",
+      "directions": ["more_likely", "less_likely", "no_change", "switch_option", "unclear"]
+    },
+    {
+      "id": "premium_option_discount_50",
+      "type": "counterfactual",
+      "question": "If a previously expensive premium alternative suddenly became 50% cheaper, how would the respondent react?",
+      "directions": ["more_likely", "less_likely", "no_change", "switch_option", "unclear"]
+    },
+    {
+      "id": "one_month_wait_or_complex_process",
+      "type": "counterfactual",
+      "question": "If buying required waiting one month or going through a complex process, how would the respondent's likelihood change?",
+      "directions": ["more_likely", "less_likely", "no_change", "switch_option", "unclear"]
+    }
+  ]
+}
