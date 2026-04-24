@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from interview_protocol import QUESTION_SET, protocol_json, protocol_markdown
 from persona_from_pdf import (
     call_openai_compatible_chat,
     call_openai_responses,
@@ -28,10 +29,24 @@ def build_ai_interview_prompt(case_dir: Path) -> str:
     schema = read_required(case_dir / "schema.json")
     persona_card = read_required(case_dir / "persona_card.md")
     simulation_prompt = read_required(case_dir / "simulation_prompt.md")
+    split_info = (case_dir / "evaluation_split.json").read_text(encoding="utf-8") if (case_dir / "evaluation_split.json").exists() else "{}"
+    full_protocol = protocol_markdown(QUESTION_SET)
 
     return "\n\n".join(
         [
             protocol,
+            "Evaluation split metadata:",
+            "```json",
+            split_info,
+            "```",
+            "Use this full interview protocol. Each question already carries its building or holdout role in the JSON metadata:",
+            "```json",
+            protocol_json(QUESTION_SET),
+            "```",
+            "Readable interview protocol:",
+            "```markdown",
+            full_protocol,
+            "```",
             "Simulated consumer source materials:",
             "## structured decision schema",
             "```json",
@@ -67,10 +82,15 @@ def call_llm(prompt: str, model: str) -> str:
 
 def write_ai_interview_files(result: dict[str, Any], case_dir: Path) -> None:
     transcript = result.get("transcript_markdown", "")
+    question_answers = result.get("question_answers", [])
     summary = result.get("summary", {})
     summary_markdown = result.get("summary_markdown", "")
 
     (case_dir / "ai_interview_transcript.md").write_text(transcript, encoding="utf-8")
+    (case_dir / "ai_interview_answers.json").write_text(
+        json.dumps(question_answers, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     (case_dir / "ai_interview_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",

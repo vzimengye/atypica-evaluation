@@ -1,81 +1,134 @@
 {
-  "version": "v2.1",
-  "description": "Fixed task benchmark for consumer decision-making simulation. These tasks are generic enough to apply across purchase/service decision interviews.",
+  "version": "v3.0-fixed-holdout",
+  "description": "Fixed task benchmark aligned to the Phase 1 holdout split. These tasks test withheld rejection logic, trust heuristics, thresholds, counterfactual shifts, and self-explanation.",
   "tasks": [
     {
-      "id": "consider_original_choice",
+      "split": "building",
+      "id": "primary_decision_priority",
       "type": "classification",
-      "question": "In the original decision context, would the respondent seriously consider the final chosen product/service/option?",
-      "options": ["yes", "maybe", "no"]
+      "question": "What does the respondent prioritize first in this decision category?",
+      "options": ["price", "brand", "effect_or_performance", "appearance", "convenience", "trust_or_recommendation", "other_or_unclear"]
     },
     {
-      "id": "abandon_on_repeated_negative_reviews",
-      "type": "classification",
-      "question": "Would repeated credible negative reviews or warning comments make the respondent abandon an option?",
-      "options": ["yes", "maybe", "no"]
+      "split": "building",
+      "id": "initial_option_attraction",
+      "type": "open",
+      "question": "Which option or direction felt most attractive at first, and why?"
     },
     {
+      "split": "building",
+      "id": "trusted_information_source",
+      "type": "ranking",
+      "question": "Rank these information sources from most persuasive to least persuasive for the respondent in the original decision.",
+      "items": ["trusted_person_experience", "peer_user_reviews", "expert_or_influencer_review", "official_claim_or_report", "brand_self_description"]
+    },
+    {
+      "split": "building",
+      "id": "constraint_pressure_strength",
+      "type": "continuous",
+      "question": "How strong are the respondent's practical constraints, such as budget, time, effort, or trial-and-error cost, in the original decision?",
+      "scale_min": 0,
+      "scale_max": 10
+    },
+    {
+      "split": "building",
+      "id": "decision_owner_structure",
+      "type": "classification",
+      "question": "Who primarily owns the final decision in the original scenario?",
+      "options": ["self_only", "must_consider_others", "mixed_or_unclear"]
+    },
+    {
+      "split": "building",
+      "id": "self_described_decision_style",
+      "type": "classification",
+      "question": "How does the respondent mainly describe their own decision style?",
+      "options": ["rational_comparison", "feeling_led", "mixed_or_unclear"]
+    },
+    {
+      "split": "holdout",
+      "id": "perfect_reviews_vs_mixed_reviews",
+      "type": "classification",
+      "question": "If one option has only perfect positive reviews and another has a few balanced, credible negative reviews, which source pattern does the respondent trust more?",
+      "options": ["mixed_credible_reviews", "perfect_positive_reviews", "depends_or_unclear"]
+    },
+    {
+      "split": "holdout",
       "id": "trust_friend_over_online_rating",
       "type": "classification",
-      "question": "If a trusted friend says the option is bad but online ratings are high, who does the respondent trust more?",
+      "question": "If a trusted person says the option is bad but online ratings are high, who does the respondent trust more?",
       "options": ["trusted_person", "online_rating", "depends_or_unclear"]
     },
     {
-      "id": "purchase_intent_original",
+      "split": "holdout",
+      "id": "core_criterion_rigidity",
       "type": "continuous",
-      "question": "How strong is the respondent's purchase/commitment intent in the original scenario?",
+      "question": "How rigid is the respondent about a core must-have criterion when the rest of the option looks good?",
       "scale_min": 0,
       "scale_max": 10
     },
     {
-      "id": "price_sensitivity",
+      "split": "holdout",
+      "id": "price_sensitivity_holdout",
       "type": "continuous",
-      "question": "How price-sensitive is the respondent in this category?",
+      "question": "How sensitive is the respondent to a meaningful price increase or discount in this decision?",
       "scale_min": 0,
       "scale_max": 10
     },
     {
-      "id": "friction_sensitivity",
+      "split": "holdout",
+      "id": "friction_sensitivity_holdout",
       "type": "continuous",
-      "question": "How sensitive is the respondent to waiting time, purchase friction, or process complexity?",
+      "question": "How sensitive is the respondent to a long wait time or a more complex purchase flow?",
       "scale_min": 0,
       "scale_max": 10
     },
     {
-      "id": "trust_signal_ranking",
+      "split": "holdout",
+      "id": "holdout_barrier_ranking",
       "type": "ranking",
-      "question": "Rank these trust signals from most persuasive to least persuasive for this respondent.",
-      "items": ["trusted_person_experience", "peer_user_reviews", "expert_or_influencer_review", "official_claim_or_report", "perfect_positive_reviews"]
+      "question": "Rank these withheld barrier types from most likely to change this respondent's decision to least likely.",
+      "items": ["core_metric_shortfall", "trusted_person_warning", "long_wait_or_complex_process", "suspicious_ad_language", "perfect_positive_reviews_only"]
     },
     {
-      "id": "barrier_ranking",
-      "type": "ranking",
-      "question": "Rank these barriers from most likely to make the respondent abandon an option to least likely.",
-      "items": ["core_effect_or_performance_problem", "credible_negative_reviews", "high_price", "long_wait_or_complex_process", "size_or_practical_fit_issue"]
-    },
-    {
-      "id": "main_hesitation",
+      "split": "holdout",
+      "id": "abandoned_option_reason",
       "type": "open",
-      "question": "What is the respondent's main hesitation or concern in this kind of decision?"
+      "question": "What kind of previously interesting option is this respondent likely to abandon, and why?"
     },
     {
-      "id": "persuasion_path",
+      "split": "holdout",
+      "id": "instant_no_signal",
       "type": "open",
-      "question": "What kind of information or proof is most likely to persuade the respondent?"
+      "question": "What kind of surface signal or detail could make this respondent reject an option almost immediately?"
     },
     {
+      "split": "holdout",
+      "id": "ad_skepticism_pattern",
+      "type": "open",
+      "question": "What kind of ad language or presentation would make this respondent feel the brand is overselling or misleading?"
+    },
+    {
+      "split": "holdout",
+      "id": "decision_weakness",
+      "type": "open",
+      "question": "What does this respondent see as a personal decision weakness or past regret pattern?"
+    },
+    {
+      "split": "holdout",
       "id": "price_increase_20",
       "type": "counterfactual",
       "question": "If the option became 20% more expensive, how would the respondent's likelihood of choosing it change?",
       "directions": ["more_likely", "less_likely", "no_change", "switch_option", "unclear"]
     },
     {
+      "split": "holdout",
       "id": "premium_option_discount_50",
       "type": "counterfactual",
       "question": "If a previously expensive premium alternative suddenly became 50% cheaper, how would the respondent react?",
       "directions": ["more_likely", "less_likely", "no_change", "switch_option", "unclear"]
     },
     {
+      "split": "holdout",
       "id": "one_month_wait_or_complex_process",
       "type": "counterfactual",
       "question": "If buying required waiting one month or going through a complex process, how would the respondent's likelihood change?",

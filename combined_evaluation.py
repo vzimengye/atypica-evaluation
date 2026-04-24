@@ -12,6 +12,8 @@ WEIGHTS = {
     "persona_grounding": 0.20,
     "behavior_consistency": 0.15,
 }
+JUDGE_JSON = "judge_report.json"
+LEGACY_EVALUATION_JSON = "evaluation_report.json"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -21,6 +23,14 @@ def read_json(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+
+
+def read_first_json(case_dir: Path, names: list[str]) -> dict[str, Any]:
+    for name in names:
+        data = read_json(case_dir / name)
+        if data:
+            return data
+    return {}
 
 
 def score_1_to_100(value: Any) -> float | None:
@@ -57,26 +67,24 @@ def label(score: float | None, complete: bool) -> str:
 
 
 def compute_combined(case_dir: Path) -> dict[str, Any]:
-    evaluation = read_json(case_dir / "evaluation_report.json")
+    judge = read_first_json(case_dir, [JUDGE_JSON, LEGACY_EVALUATION_JSON])
     benchmark = read_json(case_dir / "task_benchmark_report.json")
     stability = read_json(case_dir / "stability_report.json")
 
-    eval_scopes = evaluation.get("scope_scores", {})
+    judge_scopes = judge.get("scope_scores", {})
     benchmark_metrics = benchmark.get("metrics", {})
     stability_metrics = stability.get("metrics", {})
 
-    persona_grounding = score_1_to_100(eval_scopes.get("persona_grounding", {}).get("score"))
+    persona_grounding = score_1_to_100(judge_scopes.get("persona_grounding", {}).get("score"))
     response_fidelity = average(
         [
-            score_1_to_100(eval_scopes.get("response_fidelity", {}).get("score")),
-            ratio_to_100(benchmark_metrics.get("overall_task_score")),
-            ratio_to_100(benchmark_metrics.get("classification_accuracy")),
-            ratio_to_100(benchmark_metrics.get("ranking_top1_agreement")),
+            score_1_to_100(judge_scopes.get("response_fidelity", {}).get("weighted_score", judge_scopes.get("response_fidelity", {}).get("score"))),
+            ratio_to_100(benchmark_metrics.get("weighted_task_score", benchmark_metrics.get("overall_task_score"))),
         ]
     )
     counterfactual_sensitivity = average(
         [
-            score_1_to_100(eval_scopes.get("counterfactual_sensitivity", {}).get("score")),
+            score_1_to_100(judge_scopes.get("counterfactual_sensitivity", {}).get("weighted_score", judge_scopes.get("counterfactual_sensitivity", {}).get("score"))),
             ratio_to_100(benchmark_metrics.get("counterfactual_direction_match")),
         ]
     )
@@ -102,11 +110,12 @@ def compute_combined(case_dir: Path) -> dict[str, Any]:
             "is_complete": complete,
             "missing_components": missing,
             "weights": WEIGHTS,
+            "evaluation_mode": "fixed_holdout_phase_1",
             "conclusion": build_conclusion(overall, complete, missing),
         },
         "subscores": {key: round(value, 1) if value is not None else None for key, value in subscores.items()},
         "evidence_sources": {
-            "qualitative_judge": bool(evaluation),
+            "judge": bool(judge),
             "task_benchmark": bool(benchmark),
             "stability_test": bool(stability),
         },
@@ -118,22 +127,22 @@ def compute_combined(case_dir: Path) -> dict[str, Any]:
 
 def build_conclusion(score: float | None, complete: bool, missing: list[str]) -> str:
     if score is None:
-        return "Combined evaluation cannot be computed yet because no evaluation evidence is available."
+        return "Combined evaluation cannot be computed yet because no judge, benchmark, or stability evidence is available."
     prefix = "Complete" if complete else "Provisional"
     missing_text = "" if complete else f" Missing components: {', '.join(missing)}."
     if score >= 75:
-        return f"{prefix} combined result suggests the persona is promising for internal simulation use.{missing_text}"
+        return f"{prefix} combined result suggests the persona is promising for internal simulation use on this fixed-holdout split.{missing_text}"
     if score >= 55:
-        return f"{prefix} combined result suggests partial fidelity with notable gaps that should be reviewed before use.{missing_text}"
-    return f"{prefix} combined result suggests weak fidelity; this persona should not be relied on without further improvement.{missing_text}"
+        return f"{prefix} combined result suggests partial fixed-holdout fidelity with notable gaps that should be reviewed before use.{missing_text}"
+    return f"{prefix} combined result suggests weak fixed-holdout fidelity; this persona should not be relied on without further improvement.{missing_text}"
 
 
 def build_recommendation(score: float | None, complete: bool) -> dict[str, list[str]]:
     if score is None:
         return {
             "appropriate_uses": [],
-            "not_safe_for": ["Any decision use before evaluation is run"],
-            "next_steps": ["Run qualitative judge, task benchmark, and stability test"],
+            "not_safe_for": ["Any decision use before judge, benchmark, and stability are run"],
+            "next_steps": ["Run judge, task benchmark, and stability test"],
         }
     appropriate = ["internal hypothesis generation", "research discussion aid"]
     if score >= 70:
@@ -141,7 +150,7 @@ def build_recommendation(score: float | None, complete: bool) -> dict[str, list[
     not_safe = ["replacing human interviews", "final quantitative claims", "external proof of consumer behavior"]
     next_steps = []
     if not complete:
-        next_steps.append("Complete the missing evaluation components")
+        next_steps.append("Complete the missing judge, benchmark, or stability components")
     next_steps.append("Review mismatched tasks and counterfactual failures")
     return {
         "appropriate_uses": appropriate,
@@ -168,6 +177,7 @@ def render_combined_markdown(report: dict[str, Any]) -> str:
         [
             "# Combined Evaluation Result",
             "",
+            f"**Evaluation mode:** {summary.get('evaluation_mode', 'n/a')}",
             f"**Overall score:** {pct(summary.get('overall_score'))}",
             f"**Overall label:** {summary.get('overall_label', 'n/a')}",
             f"**Complete:** {summary.get('is_complete', False)}",

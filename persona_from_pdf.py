@@ -12,8 +12,31 @@ from typing import Any
 
 from pypdf import PdfReader
 
+from interview_protocol import (
+    QUESTION_SET,
+    holdout_questions,
+    protocol_json,
+    questions_for_persona,
+    render_ground_truth_markdown,
+    render_split_markdown,
+    split_summary,
+)
 
-SYSTEM_PROMPT = """You are a research assistant for Atypica AI Simulation validation.
+
+EXTRACTION_SYSTEM_PROMPT = """You are a research assistant for Atypica AI Simulation validation.
+
+Your first job is to extract the real respondent's answers against a fixed interview protocol.
+
+Rules:
+- Ground every extracted answer in the source interview evidence.
+- Do not infer answers that are not supported.
+- If the interview only partially answers a question, mark it as partial.
+- Keep evidence snippets short.
+- Return ONLY valid JSON. Do not include markdown fences.
+"""
+
+
+PERSONA_SYSTEM_PROMPT = """You are a research assistant for Atypica AI Simulation validation.
 
 Your job is to transform one real-consumer interview PDF into three artifacts:
 1. structured_decision_schema
@@ -30,9 +53,56 @@ Important principles:
 """
 
 
-USER_PROMPT_TEMPLATE = """Convert the following interview material into an AI simulation persona package.
+EXTRACTION_USER_PROMPT_TEMPLATE = """Extract the respondent's answers for the fixed interview protocol below.
 
 Source file: __SOURCE_FILE__
+
+Return a single valid JSON object with exactly this structure:
+
+{
+  "source_metadata": {
+    "source_file": string,
+    "respondent_name": string | null,
+    "scenario": string | null,
+    "extraction_notes": string[]
+  },
+  "question_answers": [
+    {
+      "question_id": string,
+      "block_id": string,
+      "block_label": string,
+      "question_number": number,
+      "question": string,
+      "target": string,
+      "use_for_persona": boolean,
+      "answer_status": "answered" | "partial" | "not_answered",
+      "answer_summary": string,
+      "concrete_example": string,
+      "evidence_snippets": [string],
+      "confidence": "high" | "medium" | "low",
+      "notes": string
+    }
+  ]
+}
+
+Protocol:
+```json
+__QUESTION_PROTOCOL_JSON__
+```
+
+Interview material:
+---
+__INTERVIEW_TEXT__
+---
+"""
+
+
+PERSONA_USER_PROMPT_TEMPLATE = """Convert the following building-only interview material into an AI simulation persona package.
+
+Source file: __SOURCE_FILE__
+
+This persona must be built ONLY from the provided building subset.
+Do not use hidden or withheld answers.
 
 Return a single valid JSON object with exactly these top-level keys:
 
@@ -159,9 +229,19 @@ Return a single valid JSON object with exactly these top-level keys:
   }
 }
 
-Interview material:
+Question split summary:
+```json
+__SPLIT_SUMMARY_JSON__
+```
+
+Building-only human material:
+```json
+__BUILDING_QUESTION_ANSWERS_JSON__
+```
+
+Interview material for persona grounding:
 ---
-__INTERVIEW_TEXT__
+__BUILDING_QUESTION_ANSWERS_MARKDOWN__
 ---
 """
 
@@ -175,25 +255,134 @@ def extract_pdf_text(pdf_path: Path) -> str:
     return "\n".join(chunks).strip()
 
 
+def load_cached_source_text(case_dir: Path) -> str:
+    path = case_dir / SOURCE_TEXT_FILE
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
 def slugify(value: str) -> str:
     value = re.sub(r"\.[^.]+$", "", value)
     value = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "_", value).strip("_")
     return value[:80] or "persona"
 
 
-def build_prompt(source_file: str, interview_text: str, max_chars: int) -> str:
+def build_extraction_prompt(source_file: str, interview_text: str, max_chars: int) -> str:
     if len(interview_text) > max_chars:
         interview_text = interview_text[:max_chars] + "\n\n[TRUNCATED: input exceeded max_chars]"
     return (
-        USER_PROMPT_TEMPLATE.replace("__SOURCE_FILE__", source_file)
+        EXTRACTION_USER_PROMPT_TEMPLATE.replace("__SOURCE_FILE__", source_file)
+        .replace("__QUESTION_PROTOCOL_JSON__", protocol_json(QUESTION_SET))
         .replace("__INTERVIEW_TEXT__", interview_text)
     )
 
 
-def call_openai_responses(prompt: str, model: str, api_key: str) -> str:
+def build_persona_prompt(source_file: str, building_data: dict[str, Any]) -> str:
+    building_json = json.dumps(building_data, ensure_ascii=False, indent=2)
+    building_markdown = render_ground_truth_markdown(
+        "Persona Building Ground Truth",
+        building_data.get("question_answers", []),
+    )
+    return (
+        PERSONA_USER_PROMPT_TEMPLATE.replace("__SOURCE_FILE__", source_file)
+        .replace("__SPLIT_SUMMARY_JSON__", json.dumps(split_summary(), ensure_ascii=False, indent=2))
+        .replace("__BUILDING_QUESTION_ANSWERS_JSON__", building_json)
+        .replace("__BUILDING_QUESTION_ANSWERS_MARKDOWN__", building_markdown)
+    )
+
+
+def call_with_active_provider(prompt: str, model: str, system_prompt: str) -> str:
+    ppio_key = os.getenv("PPIO_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if ppio_key:
+        return call_openai_compatible_chat(
+            prompt,
+            model,
+            ppio_key,
+            os.getenv("PPIO_BASE_URL", "https://api.ppio.com/openai"),
+            system_prompt,
+        )
+    if openai_key:
+        return call_openai_responses(prompt, model, openai_key, system_prompt)
+    raise RuntimeError("Set PPIO_API_KEY or OPENAI_API_KEY before running automatic generation.")
+
+
+def question_lookup() -> dict[str, dict[str, Any]]:
+    return {item["id"]: item for item in QUESTION_SET}
+
+
+def normalize_question_answers(extraction: dict[str, Any]) -> dict[str, Any]:
+    lookup = question_lookup()
+    normalized = []
+    existing = {item.get("question_id"): item for item in extraction.get("question_answers", [])}
+    for question in QUESTION_SET:
+        raw = existing.get(question["id"], {})
+        normalized.append(
+            {
+                "id": question["id"],
+                "question_id": question["id"],
+                "block_id": question["block_id"],
+                "block_label": question["block_label"],
+                "question_number": question["question_number"],
+                "target": question["target"],
+                "question": question["question"],
+                "use_for_persona": question["use_for_persona"],
+                "evaluation_focus": question.get("evaluation_focus", []),
+                "answer_status": raw.get("answer_status", "not_answered"),
+                "answer_summary": raw.get("answer_summary", ""),
+                "concrete_example": raw.get("concrete_example", ""),
+                "evidence_snippets": raw.get("evidence_snippets", []),
+                "confidence": raw.get("confidence", "low"),
+                "notes": raw.get("notes", ""),
+            }
+        )
+    extraction["question_answers"] = normalized
+    extraction.setdefault("source_metadata", {})
+    extraction["source_metadata"].setdefault("source_file", "")
+    extraction["source_metadata"].setdefault("respondent_name", None)
+    extraction["source_metadata"].setdefault("scenario", None)
+    extraction["source_metadata"].setdefault("extraction_notes", [])
+    return extraction
+
+
+def select_question_answers(extraction: dict[str, Any], use_for_persona: bool) -> dict[str, Any]:
+    selected = [item for item in extraction.get("question_answers", []) if item.get("use_for_persona") == use_for_persona]
+    return {
+        "source_metadata": extraction.get("source_metadata", {}),
+        "mode": "building" if use_for_persona else "holdout",
+        "question_answers": selected,
+    }
+
+
+def build_split_artifacts(extraction: dict[str, Any]) -> dict[str, Any]:
+    building = select_question_answers(extraction, True)
+    holdout = select_question_answers(extraction, False)
+    split = split_summary()
+    split["building_questions"] = questions_for_persona()
+    split["holdout_questions"] = holdout_questions()
+    return {
+        "all_questions": extraction,
+        "building": building,
+        "holdout": holdout,
+        "split": split,
+    }
+
+
+def attach_grounding_scope(schema: dict[str, Any], split: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(schema)
+    enriched["grounding_scope"] = {
+        "mode": split.get("mode"),
+        "building_question_ids": split.get("building_question_ids", []),
+        "holdout_question_ids": split.get("holdout_question_ids", []),
+    }
+    return enriched
+
+
+def call_openai_responses(prompt: str, model: str, api_key: str, system_prompt: str = PERSONA_SYSTEM_PROMPT) -> str:
     payload = {
         "model": model,
-        "instructions": SYSTEM_PROMPT,
+        "instructions": system_prompt,
         "input": prompt,
         "max_output_tokens": 8000,
     }
@@ -231,11 +420,12 @@ def call_openai_compatible_chat(
     model: str,
     api_key: str,
     base_url: str,
+    system_prompt: str = PERSONA_SYSTEM_PROMPT,
 ) -> str:
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,
@@ -345,10 +535,11 @@ def render_simulation_prompt(package: dict[str, Any]) -> str:
     )
 
 
-def write_result_files(package: dict[str, Any], output_dir: Path) -> None:
+def write_result_files(package: dict[str, Any], split_artifacts: dict[str, Any], interview_text: str, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    schema = attach_grounding_scope(package["structured_decision_schema"], split_artifacts["split"])
     (output_dir / "schema.json").write_text(
-        json.dumps(package["structured_decision_schema"], ensure_ascii=False, indent=2),
+        json.dumps(schema, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     (output_dir / "persona_card.md").write_text(
@@ -359,6 +550,39 @@ def write_result_files(package: dict[str, Any], output_dir: Path) -> None:
         render_simulation_prompt(package),
         encoding="utf-8",
     )
+    (output_dir / "interview_ground_truth.json").write_text(
+        json.dumps(split_artifacts["all_questions"], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / "interview_ground_truth.md").write_text(
+        render_ground_truth_markdown("Interview Ground Truth", split_artifacts["all_questions"]["question_answers"]),
+        encoding="utf-8",
+    )
+    (output_dir / "building_ground_truth.json").write_text(
+        json.dumps(split_artifacts["building"], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / "building_ground_truth.md").write_text(
+        render_ground_truth_markdown("Persona Building Ground Truth", split_artifacts["building"]["question_answers"]),
+        encoding="utf-8",
+    )
+    (output_dir / "holdout_ground_truth.json").write_text(
+        json.dumps(split_artifacts["holdout"], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / "holdout_ground_truth.md").write_text(
+        render_ground_truth_markdown("Holdout Evaluation Ground Truth", split_artifacts["holdout"]["question_answers"]),
+        encoding="utf-8",
+    )
+    (output_dir / "evaluation_split.json").write_text(
+        json.dumps(split_artifacts["split"], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / "evaluation_split.md").write_text(
+        render_split_markdown(split_artifacts["split"]),
+        encoding="utf-8",
+    )
+    (output_dir / SOURCE_TEXT_FILE).write_text(interview_text, encoding="utf-8")
 
 
 def generate_persona_package(
@@ -368,24 +592,15 @@ def generate_persona_package(
     max_chars: int = 45000,
 ) -> dict[str, Any]:
     interview_text = extract_pdf_text(pdf_path)
-    prompt = build_prompt(pdf_path.name, interview_text, max_chars)
+    extraction_prompt = build_extraction_prompt(pdf_path.name, interview_text, max_chars)
+    extraction_text = call_with_active_provider(extraction_prompt, model, EXTRACTION_SYSTEM_PROMPT)
+    extraction = normalize_question_answers(parse_json_object(extraction_text))
+    split_artifacts = build_split_artifacts(extraction)
 
-    ppio_key = os.getenv("PPIO_API_KEY")
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if ppio_key:
-        output_text = call_openai_compatible_chat(
-            prompt,
-            model,
-            ppio_key,
-            os.getenv("PPIO_BASE_URL", "https://api.ppio.com/openai"),
-        )
-    elif openai_key:
-        output_text = call_openai_responses(prompt, model, openai_key)
-    else:
-        raise RuntimeError("Set PPIO_API_KEY or OPENAI_API_KEY before running automatic generation.")
-
-    package = parse_json_object(output_text)
-    write_result_files(package, output_dir)
+    persona_prompt = build_persona_prompt(pdf_path.name, split_artifacts["building"])
+    persona_text = call_with_active_provider(persona_prompt, model, PERSONA_SYSTEM_PROMPT)
+    package = parse_json_object(persona_text)
+    write_result_files(package, split_artifacts, interview_text, output_dir)
     return package
 
 
@@ -419,3 +634,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+SOURCE_TEXT_FILE = "source_pdf_text.txt"

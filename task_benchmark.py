@@ -9,12 +9,13 @@ from typing import Any
 
 from ai_interview import call_llm, read_required
 from evaluation import find_source_pdf
-from persona_from_pdf import extract_pdf_text, parse_json_object
+from persona_from_pdf import extract_pdf_text, load_cached_source_text, parse_json_object
 
 
 ROOT = Path(__file__).resolve().parent
 TASKS_PATH = ROOT / "benchmark_tasks.json"
 PROMPT_PATH = ROOT / "prompts" / "task_answering.md"
+SPLIT_WEIGHTS = {"building": 0.4, "holdout": 0.6}
 
 
 def load_tasks() -> dict[str, Any]:
@@ -43,21 +44,41 @@ def build_answer_prompt(
 
 
 def human_source_materials(case_dir: Path, max_chars: int = 45000) -> str:
+    split_info = (case_dir / "evaluation_split.json").read_text(encoding="utf-8") if (case_dir / "evaluation_split.json").exists() else "{}"
+    building_md = (case_dir / "building_ground_truth.md").read_text(encoding="utf-8") if (case_dir / "building_ground_truth.md").exists() else ""
+    holdout_md = (case_dir / "holdout_ground_truth.md").read_text(encoding="utf-8") if (case_dir / "holdout_ground_truth.md").exists() else ""
     schema = read_required(case_dir / "schema.json")
     source_pdf = find_source_pdf(case_dir)
-    if source_pdf:
+    cached_text = load_cached_source_text(case_dir)
+    if cached_text:
+        human_text = cached_text
+        if len(human_text) > max_chars:
+            human_text = human_text[:max_chars] + "\n\n[TRUNCATED: human material exceeded max chars]"
+    elif source_pdf:
         human_text = extract_pdf_text(source_pdf)
         if len(human_text) > max_chars:
             human_text = human_text[:max_chars] + "\n\n[TRUNCATED: human material exceeded max chars]"
     else:
-        human_text = "[SOURCE PDF NOT FOUND. Use structured schema as primary ground truth.]"
+        human_text = "[SOURCE PDF NOT FOUND. Use building and holdout ground truth as primary human evidence.]"
     return "\n\n".join(
         [
+            "### Evaluation split metadata",
+            "```json",
+            split_info,
+            "```",
+            "### Human building subset",
+            "```markdown",
+            building_md,
+            "```",
+            "### Human holdout subset",
+            "```markdown",
+            holdout_md,
+            "```",
             "### Human interview material",
             "```text",
             human_text,
             "```",
-            "### Human structured decision schema",
+            "### Persona schema for context only",
             "```json",
             schema,
             "```",
@@ -69,10 +90,13 @@ def ai_source_materials(case_dir: Path) -> str:
     persona_card = read_required(case_dir / "persona_card.md")
     simulation_prompt = read_required(case_dir / "simulation_prompt.md")
     schema = read_required(case_dir / "schema.json")
-    ai_summary = (case_dir / "ai_interview_summary.json").read_text(encoding="utf-8") if (case_dir / "ai_interview_summary.json").exists() else "{}"
-    ai_transcript = (case_dir / "ai_interview_transcript.md").read_text(encoding="utf-8") if (case_dir / "ai_interview_transcript.md").exists() else ""
+    split_info = (case_dir / "evaluation_split.json").read_text(encoding="utf-8") if (case_dir / "evaluation_split.json").exists() else "{}"
     return "\n\n".join(
         [
+            "### Evaluation split metadata",
+            "```json",
+            split_info,
+            "```",
             "### AI persona card",
             "```markdown",
             persona_card,
@@ -85,13 +109,8 @@ def ai_source_materials(case_dir: Path) -> str:
             "```json",
             schema,
             "```",
-            "### AI interview transcript and summary",
-            "```markdown",
-            ai_transcript,
-            "```",
-            "```json",
-            ai_summary,
-            "```",
+            "### Important benchmark rule",
+            "Use only the persona package above. Do not assume access to the withheld human answers or the AI interview outputs.",
         ]
     )
 
@@ -148,6 +167,7 @@ def score_tasks(tasks: dict[str, Any], human_answers: dict[str, Any], ai_answers
         result: dict[str, Any] = {
             "task_id": task_id,
             "type": task_type,
+            "split": task.get("split", "holdout"),
             "question": task.get("question", ""),
             "human_answer": h,
             "ai_answer": a,
@@ -186,11 +206,11 @@ def score_tasks(tasks: dict[str, Any], human_answers: dict[str, Any], ai_answers
         per_task.append(result)
         buckets.setdefault(task_type, []).append(result)
 
-    metrics = summarize_metrics(buckets)
+    metrics = summarize_metrics(buckets, per_task)
     return {"metrics": metrics, "per_task": per_task}
 
 
-def summarize_metrics(buckets: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def summarize_metrics(buckets: dict[str, list[dict[str, Any]]], per_task: list[dict[str, Any]]) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
 
     classification = buckets.get("classification", [])
@@ -224,8 +244,39 @@ def summarize_metrics(buckets: dict[str, list[dict[str, Any]]]) -> dict[str, Any
         for item in items
         if isinstance(item.get("score"), (int, float)) and not math.isnan(float(item["score"]))
     ]
-    metrics["overall_task_score"] = average_score(scored) if scored else None
+    metrics["raw_average_task_score"] = average_score(scored) if scored else None
+    split_scores = summarize_split_scores(per_task)
+    metrics.update(split_scores)
+    metrics["overall_task_score"] = metrics.get("weighted_task_score")
     return metrics
+
+
+def summarize_split_scores(per_task: list[dict[str, Any]]) -> dict[str, Any]:
+    split_values: dict[str, list[dict[str, Any]]] = {"building": [], "holdout": []}
+    for item in per_task:
+        if isinstance(item.get("score"), (int, float)):
+            split = str(item.get("split", "holdout"))
+            split_values.setdefault(split, []).append(item)
+
+    result: dict[str, Any] = {}
+    for split, items in split_values.items():
+        result[f"{split}_task_score"] = average_score(items)
+        result[f"{split}_task_count"] = len(items)
+
+    available_weight = sum(
+        weight for split, weight in SPLIT_WEIGHTS.items() if result.get(f"{split}_task_score") is not None
+    )
+    if available_weight > 0:
+        weighted = sum(
+            (result.get(f"{split}_task_score") or 0.0) * weight
+            for split, weight in SPLIT_WEIGHTS.items()
+            if result.get(f"{split}_task_score") is not None
+        ) / available_weight
+    else:
+        weighted = None
+    result["weighted_task_score"] = weighted
+    result["split_weights"] = SPLIT_WEIGHTS
+    return result
 
 
 def average_score(items: list[dict[str, Any]]) -> float | None:
@@ -246,8 +297,12 @@ def render_benchmark_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Task Benchmark Report",
         "",
+        f"- Evaluation mode: {report.get('evaluation_mode', 'n/a')}",
+        "",
         "## Summary Metrics",
         f"- Overall task score: {percent(metrics.get('overall_task_score'))}",
+        f"- Building task score: {percent(metrics.get('building_task_score'))} ({metrics.get('building_task_count', 0)} tasks)",
+        f"- Holdout task score: {percent(metrics.get('holdout_task_score'))} ({metrics.get('holdout_task_count', 0)} tasks)",
         f"- Classification accuracy: {percent(metrics.get('classification_accuracy'))} ({metrics.get('classification_match_count', 'n/a')})",
         f"- Continuous MAE: {metrics.get('continuous_mae', 'n/a')}",
         f"- Ranking top-1 agreement: {percent(metrics.get('ranking_top1_agreement'))} ({metrics.get('ranking_top1_count', 'n/a')})",
@@ -261,6 +316,7 @@ def render_benchmark_markdown(report: dict[str, Any]) -> str:
             [
                 f"### {item.get('task_id')}",
                 f"- Type: {item.get('type')}",
+                f"- Split: {item.get('split')}",
                 f"- Human: {item.get('human_answer')}",
                 f"- AI: {item.get('ai_answer')}",
                 f"- Score: {item.get('score', 'n/a')}",
@@ -298,11 +354,24 @@ def write_benchmark_files(
 
 def run_task_benchmark(case_dir: Path, model: str) -> dict[str, Any]:
     tasks = load_tasks()
-    human_answers = run_task_answering("human", human_source_materials(case_dir), tasks, model)
+    benchmark_version = tasks.get("version")
+    existing_human = {}
+    human_answers_path = case_dir / "human_task_answers.json"
+    if human_answers_path.exists():
+        try:
+            existing_human = json.loads(human_answers_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing_human = {}
+    if existing_human.get("benchmark_version") == benchmark_version and existing_human.get("answers"):
+        human_answers = existing_human
+    else:
+        human_answers = run_task_answering("human", human_source_materials(case_dir), tasks, model)
+        human_answers["benchmark_version"] = benchmark_version
     ai_answers = run_task_answering("ai_persona", ai_source_materials(case_dir), tasks, model)
     scored = score_tasks(tasks, human_answers, ai_answers)
     report = {
-        "benchmark_version": tasks.get("version"),
+        "benchmark_version": benchmark_version,
+        "evaluation_mode": "fixed_holdout_phase_1",
         "metrics": scored["metrics"],
         "per_task": scored["per_task"],
     }

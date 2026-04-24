@@ -10,6 +10,9 @@ from typing import Any
 from task_benchmark import ai_source_materials, load_tasks, run_task_answering
 
 
+SPLIT_WEIGHTS = {"building": 0.4, "holdout": 0.6}
+
+
 def answer_map(answer_result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {item.get("task_id", ""): item for item in answer_result.get("answers", [])}
 
@@ -63,14 +66,17 @@ def score_stability(tasks: dict[str, Any], runs: list[dict[str, Any]]) -> dict[s
     counterfactual_scores: list[float] = []
     ranking_scores: list[float] = []
     continuous_ranges: list[float] = []
+    split_task_scores: dict[str, list[float]] = {"building": [], "holdout": []}
 
     for task in tasks.get("tasks", []):
         task_id = task["id"]
         task_type = task["type"]
+        split = task.get("split", "holdout")
         values = [normalized(run, task_id) for run in runs]
         result: dict[str, Any] = {
             "task_id": task_id,
             "type": task_type,
+            "split": split,
             "values": values,
         }
 
@@ -79,6 +85,7 @@ def score_stability(tasks: dict[str, Any], runs: list[dict[str, Any]]) -> dict[s
             result["consistency"] = score
             result["stable_answer"] = Counter(json.dumps(v, ensure_ascii=False, sort_keys=True) for v in values).most_common(1)[0][0] if values else None
             task_scores.append(score)
+            split_task_scores.setdefault(split, []).append(score)
             if task_type == "classification":
                 classification_scores.append(score)
             else:
@@ -88,6 +95,7 @@ def score_stability(tasks: dict[str, Any], runs: list[dict[str, Any]]) -> dict[s
             score = consistency_ratio(top_values)
             result["top1_consistency"] = score
             task_scores.append(score)
+            split_task_scores.setdefault(split, []).append(score)
             ranking_scores.append(score)
         elif task_type == "continuous":
             value_range = numeric_range(values)
@@ -96,6 +104,7 @@ def score_stability(tasks: dict[str, Any], runs: list[dict[str, Any]]) -> dict[s
             result["range"] = value_range
             result["consistency"] = score
             task_scores.append(score)
+            split_task_scores.setdefault(split, []).append(score)
             if value_range is not None:
                 continuous_ranges.append(value_range)
         else:
@@ -104,9 +113,23 @@ def score_stability(tasks: dict[str, Any], runs: list[dict[str, Any]]) -> dict[s
         per_task.append(result)
 
     overall = sum(task_scores) / len(task_scores) if task_scores else 0.0
+    building_score = average(split_task_scores.get("building", []))
+    holdout_score = average(split_task_scores.get("holdout", []))
+    available_weight = sum(weight for split, weight in SPLIT_WEIGHTS.items() if average(split_task_scores.get(split, [])) is not None)
+    weighted = None
+    if available_weight > 0:
+        weighted = sum(
+            (average(split_task_scores.get(split, [])) or 0.0) * weight
+            for split, weight in SPLIT_WEIGHTS.items()
+            if average(split_task_scores.get(split, [])) is not None
+        ) / available_weight
     metrics = {
-        "overall_stability_score": overall,
-        "stability_label": classify_stability(overall),
+        "overall_stability_score": weighted if weighted is not None else overall,
+        "raw_average_stability_score": overall,
+        "stability_label": classify_stability(weighted if weighted is not None else overall),
+        "building_stability_score": building_score,
+        "holdout_stability_score": holdout_score,
+        "split_weights": SPLIT_WEIGHTS,
         "classification_consistency": sum(classification_scores) / len(classification_scores) if classification_scores else None,
         "counterfactual_consistency": sum(counterfactual_scores) / len(counterfactual_scores) if counterfactual_scores else None,
         "ranking_top1_consistency": sum(ranking_scores) / len(ranking_scores) if ranking_scores else None,
@@ -121,13 +144,22 @@ def pct(value: Any) -> str:
     return "n/a"
 
 
+def average(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def render_stability_markdown(report: dict[str, Any]) -> str:
     metrics = report.get("metrics", {})
     lines = [
         "# Stability Report",
         "",
+        f"**Evaluation mode:** {report.get('evaluation_mode', 'n/a')}",
         f"**Stability label:** {metrics.get('stability_label', 'n/a')}",
         f"**Overall stability score:** {pct(metrics.get('overall_stability_score'))}",
+        f"**Building stability score:** {pct(metrics.get('building_stability_score'))}",
+        f"**Holdout stability score:** {pct(metrics.get('holdout_stability_score'))}",
         "",
         "## Metrics",
         f"- Classification consistency: {pct(metrics.get('classification_consistency'))}",
@@ -143,6 +175,7 @@ def render_stability_markdown(report: dict[str, Any]) -> str:
             [
                 f"### {item.get('task_id')}",
                 f"- Type: {item.get('type')}",
+                f"- Split: {item.get('split')}",
                 f"- Stability: {pct(score) if isinstance(score, (int, float)) else score}",
                 f"- Values: {item.get('values')}",
                 "",
@@ -175,6 +208,7 @@ def run_stability_test(case_dir: Path, model: str, runs: int = 3) -> dict[str, A
     run_results = [run_task_answering("ai_persona", source, tasks, model) for _ in range(runs)]
     scored = score_stability(tasks, run_results)
     report = {
+        "evaluation_mode": "fixed_holdout_phase_1",
         "runs": runs,
         "metrics": scored["metrics"],
         "per_task": scored["per_task"],

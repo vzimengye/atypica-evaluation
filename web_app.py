@@ -17,7 +17,7 @@ import cgi
 
 from ai_interview import run_ai_interview
 from combined_evaluation import compute_combined
-from evaluation import run_evaluation
+from evaluation import run_judge
 from persona_from_pdf import generate_persona_package, slugify
 from stability import run_stability_test
 from task_benchmark import run_task_benchmark
@@ -27,12 +27,24 @@ ROOT = Path(__file__).resolve().parent
 UPLOADS_DIR = ROOT / "uploads"
 RESULTS_DIR = ROOT / "results"
 CORE_FILES = ("schema.json", "persona_card.md", "simulation_prompt.md")
+SPLIT_FILES = (
+    "evaluation_split.json",
+    "evaluation_split.md",
+    "interview_ground_truth.json",
+    "interview_ground_truth.md",
+    "building_ground_truth.json",
+    "building_ground_truth.md",
+    "holdout_ground_truth.json",
+    "holdout_ground_truth.md",
+)
 INTERVIEW_FILES = (
     "ai_interview_transcript.md",
+    "ai_interview_answers.json",
     "ai_interview_summary.json",
     "ai_interview_summary.md",
 )
-EVALUATION_FILES = ("evaluation_report.json", "evaluation_report.md")
+JUDGE_FILES = ("judge_report.json", "judge_report.md")
+LEGACY_EVALUATION_FILES = ("evaluation_report.json", "evaluation_report.md")
 BENCHMARK_FILES = (
     "human_task_answers.json",
     "ai_task_answers.json",
@@ -42,7 +54,7 @@ BENCHMARK_FILES = (
 STABILITY_FILES = ("stability_report.json", "stability_report.md")
 COMBINED_FILES = ("combined_evaluation_report.json", "combined_evaluation_report.md")
 JOB_STATUS_FILE = "evaluation_job_status.json"
-DOWNLOADABLE_FILES = CORE_FILES + INTERVIEW_FILES + EVALUATION_FILES + BENCHMARK_FILES + STABILITY_FILES + COMBINED_FILES
+DOWNLOADABLE_FILES = CORE_FILES + SPLIT_FILES + INTERVIEW_FILES + JUDGE_FILES + LEGACY_EVALUATION_FILES + BENCHMARK_FILES + STABILITY_FILES + COMBINED_FILES
 JOB_LOCK = threading.Lock()
 ACTIVE_JOBS: set[str] = set()
 
@@ -70,8 +82,8 @@ def has_interview_result(path: Path) -> bool:
     return all((path / name).exists() for name in INTERVIEW_FILES)
 
 
-def has_evaluation_result(path: Path) -> bool:
-    return all((path / name).exists() for name in EVALUATION_FILES)
+def has_judge_result(path: Path) -> bool:
+    return all((path / name).exists() for name in JUDGE_FILES) or all((path / name).exists() for name in LEGACY_EVALUATION_FILES)
 
 
 def has_benchmark_result(path: Path) -> bool:
@@ -224,6 +236,7 @@ def render_evaluation_dashboard(report: dict) -> str:
     overall_score = summary.get("overall_score")
     overall_label = summary.get("overall_label", "n/a")
     overall_percent = score_to_percent(overall_score)
+    split_weighting = summary.get("split_weighting", {})
 
     scope_cards = []
     for key in ("persona_grounding", "response_fidelity", "counterfactual_sensitivity"):
@@ -238,13 +251,26 @@ def render_evaluation_dashboard(report: dict) -> str:
             """
         )
     consistency = scope_scores.get("behavior_consistency", {})
+    stability_report = report.get("_stability_report", {})
+    stability_metrics = stability_report.get("metrics", {}) if isinstance(stability_report, dict) else {}
     if consistency:
+        measured = bool(stability_metrics)
+        consistency_title = (
+            pct_label(stability_metrics.get("overall_stability_score"))
+            if measured
+            else ("Not scored here" if consistency.get("score") == "not_tested" else score_label(consistency.get("score")))
+        )
+        consistency_text = (
+            f"Measured in Stability Test: {stability_metrics.get('stability_label', 'n/a')}"
+            if measured
+            else f"Run Stability Test for measured repeat-run evidence. Current risk: {consistency.get('current_consistency_risk', 'n/a')}"
+        )
         scope_cards.append(
             f"""
             <div class="metric-card">
               <span>Behavior Consistency</span>
-              <strong>{html.escape(score_label(consistency.get("score")))}</strong>
-              <p>Current risk: {html.escape(str(consistency.get("current_consistency_risk", "n/a")))}</p>
+              <strong>{html.escape(str(consistency_title))}</strong>
+              <p>{html.escape(str(consistency_text))}</p>
             </div>
             """
         )
@@ -252,6 +278,39 @@ def render_evaluation_dashboard(report: dict) -> str:
     dimension_bars = []
     for key, value in dimensions.items():
         dimension_bars.append(render_score_bar(humanize_key(key), value.get("score"), value.get("reason", "")))
+
+    weighted_cards = []
+    for key in ("response_fidelity", "counterfactual_sensitivity"):
+        value = scope_scores.get(key, {})
+        if any(metric in value for metric in ("building_score", "holdout_score", "weighted_score")):
+            weighted_cards.append(
+                f"""
+                <div class="metric-card compact">
+                  <span>{html.escape(humanize_key(key))} Split</span>
+                  <strong>{html.escape(score_label(value.get("weighted_score", value.get("score"))))}</strong>
+                  <p>Building: {html.escape(score_label(value.get("building_score")))} | Holdout: {html.escape(score_label(value.get("holdout_score")))}</p>
+                </div>
+                """
+            )
+
+    split_comparison = []
+    for key in ("response_fidelity", "counterfactual_sensitivity"):
+        value = scope_scores.get(key, {})
+        if "building_score" in value or "holdout_score" in value:
+            split_comparison.append(
+                render_score_bar(
+                    f"{humanize_key(key)} Building",
+                    value.get("building_score"),
+                    "",
+                )
+            )
+            split_comparison.append(
+                render_score_bar(
+                    f"{humanize_key(key)} Holdout",
+                    value.get("holdout_score"),
+                    "",
+                )
+            )
 
     return f"""
     <div class="evaluation-dashboard">
@@ -272,6 +331,14 @@ def render_evaluation_dashboard(report: dict) -> str:
       <div class="metric-grid">
         {''.join(scope_cards)}
       </div>
+
+      <div class="chips">
+        <span class="chip">Building weight: {html.escape(str(split_weighting.get("building", 0.4)))}</span>
+        <span class="chip">Holdout weight: {html.escape(str(split_weighting.get("holdout", 0.6)))}</span>
+      </div>
+
+      {f"<div class='metric-grid'>{''.join(weighted_cards)}</div>" if weighted_cards else ""}
+      {f"<div class='chart-card'><h3>Seen vs Unseen Split</h3>{''.join(split_comparison)}</div>" if split_comparison else ""}
 
       <div class="chart-card">
         <h3>Dimension Scores</h3>
@@ -306,8 +373,11 @@ def render_benchmark_dashboard(report: dict) -> str:
     if not report:
         return ""
     metrics = report.get("metrics", {})
+    split_weights = metrics.get("split_weights", {})
     cards = [
         ("Overall Task Score", metrics.get("overall_task_score"), None),
+        ("Building Task Score", metrics.get("building_task_score"), metrics.get("building_task_count")),
+        ("Holdout Task Score", metrics.get("holdout_task_score"), metrics.get("holdout_task_count")),
         ("Classification", metrics.get("classification_accuracy"), metrics.get("classification_match_count")),
         ("Ranking Top-1", metrics.get("ranking_top1_agreement"), metrics.get("ranking_top1_count")),
         ("Counterfactual", metrics.get("counterfactual_direction_match"), metrics.get("counterfactual_direction_count")),
@@ -343,7 +413,7 @@ def render_benchmark_dashboard(report: dict) -> str:
         <div>
           <span class="eyebrow">Task Benchmark Snapshot</span>
           <h3>{html.escape(pct_label(metrics.get("overall_task_score")))} Overall Task Alignment</h3>
-          <p>Compares human-derived task answers and AI persona task answers across classification, continuous, ranking, open, and counterfactual tasks.</p>
+          <p>Compares human-derived and AI persona task answers across building and holdout tasks, with heavier weight on holdout behavior.</p>
         </div>
         <div class="overall-score">
           <div class="score-ring" style="--score: {overall_task_percent}%">
@@ -354,6 +424,12 @@ def render_benchmark_dashboard(report: dict) -> str:
       </div>
       <div class="metric-grid">
         {''.join(card_html)}
+      </div>
+      <div class="chips">
+        <span class="chip">Building tasks: {html.escape(str(metrics.get("building_task_count", 0)))}</span>
+        <span class="chip">Holdout tasks: {html.escape(str(metrics.get("holdout_task_count", 0)))}</span>
+        <span class="chip">Building weight: {html.escape(str(split_weights.get("building", 0.4)))}</span>
+        <span class="chip">Holdout weight: {html.escape(str(split_weights.get("holdout", 0.6)))}</span>
       </div>
       <div class="chart-card">
         <h3>Task Metrics</h3>
@@ -370,6 +446,7 @@ def render_stability_dashboard(report: dict) -> str:
     metrics = report.get("metrics", {})
     overall = metrics.get("overall_stability_score")
     overall_percent = round(float(overall or 0) * 100)
+    split_weights = metrics.get("split_weights", {})
     bars = [
         ("Classification Consistency", metrics.get("classification_consistency")),
         ("Counterfactual Consistency", metrics.get("counterfactual_consistency")),
@@ -385,7 +462,7 @@ def render_stability_dashboard(report: dict) -> str:
         <div>
           <span class="eyebrow">Stability Snapshot</span>
           <h3>{html.escape(str(metrics.get("stability_label", "n/a")).title())} Stability</h3>
-          <p>Measures whether the same AI persona gives stable answers when the same fixed tasks are repeated.</p>
+          <p>Measures whether the same AI persona gives stable answers when the same split-labeled task set is repeated, with heavier weight on holdout tasks.</p>
         </div>
         <div class="overall-score">
           <div class="score-ring" style="--score: {overall_percent}%">
@@ -397,6 +474,12 @@ def render_stability_dashboard(report: dict) -> str:
       <div class="chart-card">
         <h3>Stability Metrics</h3>
         {''.join(bar_html)}
+        <div class="chips">
+          <span class="chip">Building weight: {html.escape(str(split_weights.get("building", 0.4)))}</span>
+          <span class="chip">Holdout weight: {html.escape(str(split_weights.get("holdout", 0.6)))}</span>
+        </div>
+        <p class="metric-note">Building stability: {html.escape(pct_label(metrics.get("building_stability_score")))}</p>
+        <p class="metric-note">Holdout stability: {html.escape(pct_label(metrics.get("holdout_stability_score")))}</p>
         <p class="metric-note">Continuous average range: {html.escape(str(metrics.get("continuous_average_range", "n/a")))}</p>
       </div>
     </div>
@@ -461,7 +544,7 @@ def render_combined_dashboard(report: dict) -> str:
 def status_badges(case: Path) -> str:
     persona_status = "done" if has_core_result(case) else "missing"
     interview_status = "done" if has_interview_result(case) else "not run"
-    evaluation_status = "done" if has_evaluation_result(case) else "not run"
+    judge_status = "done" if has_judge_result(case) else "not run"
     benchmark_status = "done" if has_benchmark_result(case) else "not run"
     stability_status = "done" if has_stability_result(case) else "not run"
     combined_status = "done" if has_combined_result(case) else "not run"
@@ -469,7 +552,7 @@ def status_badges(case: Path) -> str:
     badges = (
         f"<span class='badge ok'>Persona: {persona_status}</span>"
         f"<span class='badge {'ok' if interview_status == 'done' else 'idle'}'>AI Interview: {interview_status}</span>"
-        f"<span class='badge {'ok' if evaluation_status == 'done' else 'idle'}'>Judge: {evaluation_status}</span>"
+        f"<span class='badge {'ok' if judge_status == 'done' else 'idle'}'>Judge: {judge_status}</span>"
         f"<span class='badge {'ok' if benchmark_status == 'done' else 'idle'}'>Benchmark: {benchmark_status}</span>"
         f"<span class='badge {'ok' if stability_status == 'done' else 'idle'}'>Stability: {stability_status}</span>"
         f"<span class='badge {'ok' if combined_status == 'done' else 'idle'}'>Overall: {combined_status}</span>"
@@ -483,9 +566,18 @@ def render_download_links(case_name: str) -> str:
     links = []
     case_dir = RESULTS_DIR / case_name
     for name in DOWNLOADABLE_FILES:
+        if name in LEGACY_EVALUATION_FILES and all((case_dir / current).exists() for current in JUDGE_FILES):
+            continue
         if (case_dir / name).exists():
             links.append(f"<a href='/download/{quote(case_name)}/{name}'>{html.escape(name)}</a>")
-    return "".join(links)
+    if not links:
+        return ""
+    return f"""
+    <details class="file-links">
+      <summary>Files ({len(links)})</summary>
+      <div class="links">{''.join(links)}</div>
+    </details>
+    """
 
 
 def component_status(done: bool, running: bool = False) -> str:
@@ -494,12 +586,30 @@ def component_status(done: bool, running: bool = False) -> str:
     return "done" if done else "pending"
 
 
+def read_judge_text(case: Path, suffix: str) -> str:
+    for name in (f"judge_report.{suffix}", f"evaluation_report.{suffix}"):
+        path = case / name
+        if path.exists():
+            return read_text(path)
+    return ""
+
+
+def parse_judge_report(case: Path) -> dict:
+    for name in ("judge_report.json", "evaluation_report.json"):
+        path = case / name
+        report = parse_json_file(path)
+        if report:
+            return report
+    return {}
+
+
 def render_evaluation_suite(case: Path) -> str:
     job = read_job_status(case)
     steps = job.get("steps", {}) if job.get("status") == "running" else {}
+    split_info = parse_json_file(case / "evaluation_split.json")
     components = [
         ("AI Interview", has_interview_result(case), steps.get("ai_interview") == "running"),
-        ("Judge", has_evaluation_result(case), steps.get("qualitative_judge") == "running"),
+        ("Judge", has_judge_result(case), steps.get("judge") == "running"),
         ("Task Benchmark", has_benchmark_result(case), steps.get("task_benchmark") == "running"),
         ("Stability Test", has_stability_result(case), steps.get("stability_test") == "running"),
         ("Overall Result", has_combined_result(case), steps.get("overall") == "running"),
@@ -518,7 +628,12 @@ def render_evaluation_suite(case: Path) -> str:
     return f"""
     <section class="panel suite-panel" id="evaluation-suite">
       <h2>Evaluation Suite</h2>
-      <p>Full Evaluation runs the three evidence modules in order. Each completed module appears immediately; Overall is added after all three are done.</p>
+      <p>Phase 1 uses a fixed split. Persona creation uses the building subset, AI Interview asks the full protocol, and Judge, Task Benchmark, and Stability score building plus holdout with heavier holdout weight. Full Evaluation runs the three evidence modules in order. Each completed module appears immediately; Overall is added after all three are done.</p>
+      <div class="chips">
+        <span class="chip">Mode: {html.escape(str(split_info.get("mode", "fixed_holdout_phase_1")))}</span>
+        <span class="chip">Building: {html.escape(str(split_info.get("building_count", "n/a")))}</span>
+        <span class="chip">Holdout: {html.escape(str(split_info.get("holdout_count", "n/a")))}</span>
+      </div>
       <div class="suite-grid">{''.join(cards)}</div>
     </section>
     """
@@ -529,12 +644,20 @@ def render_case_content(case: Path) -> str:
     persona = markdown_to_html(read_text(case / "persona_card.md"))
     simulation = markdown_to_html(read_text(case / "simulation_prompt.md"))
     schema = html.escape(read_text(case / "schema.json"))
+    split_md = markdown_to_html(read_text(case / "evaluation_split.md"))
+    split_json = html.escape(read_text(case / "evaluation_split.json"))
+    building_md = markdown_to_html(read_text(case / "building_ground_truth.md"))
+    holdout_md = markdown_to_html(read_text(case / "holdout_ground_truth.md"))
     transcript = markdown_to_html(read_text(case / "ai_interview_transcript.md"))
+    interview_answers_json = html.escape(read_text(case / "ai_interview_answers.json"))
     interview_summary_md = markdown_to_html(read_text(case / "ai_interview_summary.md"))
     interview_summary_json = html.escape(read_text(case / "ai_interview_summary.json"))
-    evaluation_md = markdown_to_html(read_text(case / "evaluation_report.md"))
-    evaluation_json = html.escape(read_text(case / "evaluation_report.json"))
-    evaluation_dashboard = render_evaluation_dashboard(parse_json_file(case / "evaluation_report.json"))
+    judge_report = parse_judge_report(case)
+    if judge_report:
+        judge_report["_stability_report"] = parse_json_file(case / "stability_report.json")
+    evaluation_md = markdown_to_html(read_judge_text(case, "md"))
+    evaluation_json = html.escape(read_judge_text(case, "json"))
+    evaluation_dashboard = render_evaluation_dashboard(judge_report)
     benchmark_md = markdown_to_html(read_text(case / "task_benchmark_report.md"))
     benchmark_json = html.escape(read_text(case / "task_benchmark_report.json"))
     benchmark_dashboard = render_benchmark_dashboard(parse_json_file(case / "task_benchmark_report.json"))
@@ -562,6 +685,10 @@ def render_case_content(case: Path) -> str:
           <h2>AI Interview Summary</h2>
           <div class="markdown">{interview_summary_md}</div>
           <details>
+            <summary>View per-question answers JSON</summary>
+            <pre><code>{interview_answers_json}</code></pre>
+          </details>
+          <details>
             <summary>View summary JSON</summary>
             <pre><code>{interview_summary_json}</code></pre>
           </details>
@@ -571,25 +698,25 @@ def render_case_content(case: Path) -> str:
         interview_panel = """
         <section class="panel muted-panel" id="ai-interview-transcript">
           <h2>AI Interview</h2>
-          <p>No AI interview yet. Run the fixed Block 1-6 interview to test this persona's decision logic.</p>
+          <p>No AI interview yet. Run the full interview to test this persona on both building and holdout questions.</p>
         </section>
         """
 
-    if has_evaluation_result(case):
+    if has_judge_result(case):
         evaluation_panel = f"""
-        <section class="panel" id="evaluation-report">
+        <section class="panel" id="judge-report">
           <h2>Judge</h2>
           {evaluation_dashboard}
           <div class="markdown">{evaluation_md}</div>
           <details>
-            <summary>View evaluation JSON</summary>
+            <summary>View judge JSON</summary>
             <pre><code>{evaluation_json}</code></pre>
           </details>
         </section>
         """
     else:
         evaluation_panel = """
-        <section class="panel muted-panel" id="evaluation-report">
+        <section class="panel muted-panel" id="judge-report">
           <h2>Judge</h2>
           <p>No judge result yet. Run it after the AI interview is complete.</p>
         </section>
@@ -611,7 +738,7 @@ def render_case_content(case: Path) -> str:
         benchmark_panel = """
         <section class="panel muted-panel" id="task-benchmark">
           <h2>Task Benchmark</h2>
-          <p>No task benchmark yet. Run it after the persona has been generated.</p>
+          <p>No task benchmark yet. Run it after the persona has been generated. This stage scores building and holdout tasks with 40/60 weighting.</p>
         </section>
         """
 
@@ -631,7 +758,7 @@ def render_case_content(case: Path) -> str:
         stability_panel = """
         <section class="panel muted-panel" id="stability-test">
           <h2>Stability Test</h2>
-          <p>No stability test yet. Full Evaluation will run it after Judge and Task Benchmark.</p>
+          <p>No stability test yet. Full Evaluation will rerun the split-labeled task benchmark after Judge and Task Benchmark.</p>
         </section>
         """
 
@@ -651,7 +778,7 @@ def render_case_content(case: Path) -> str:
         combined_panel = """
         <section class="panel muted-panel" id="overall-evaluation">
           <h2>Overall Evaluation</h2>
-          <p>No combined result yet. It appears after the evaluation components finish.</p>
+          <p>No combined result yet. It appears after Judge, Task Benchmark, and Stability finish.</p>
         </section>
         """
 
@@ -680,27 +807,27 @@ def render_case_content(case: Path) -> str:
     <section class="result-head">
       <h1>{html.escape(case_name)}</h1>
       <div class="badges">{status_badges(case)}</div>
-      <div class="links">{render_download_links(case_name)}</div>
-      <form class="inline-form primary-action" method="post" action="/full-evaluation" data-loading-title="Full Evaluation Running" data-loading-message="AI Interview -> Judge -> Task Benchmark -> Stability -> Overall. Partial results appear as each step finishes.">
+      {render_download_links(case_name)}
+      <form class="inline-form primary-action" method="post" action="/full-evaluation" data-loading-title="Full Evaluation Running" data-loading-message="AI Interview -> Judge -> Task Benchmark -> Stability -> Overall. Building and holdout results update as each step finishes.">
         <input type="hidden" name="case" value="{html.escape(case_name)}">
         <button type="submit">Run Full Evaluation</button>
       </form>
       <details class="advanced-actions">
         <summary>Advanced controls</summary>
         <div class="advanced-action-grid">
-      <form class="inline-form" method="post" action="/interview" data-loading-title="Running AI Interview" data-loading-message="The AI persona is answering the fixed Block 1-6 interview protocol.">
+      <form class="inline-form" method="post" action="/interview" data-loading-title="Running AI Interview" data-loading-message="The AI persona is answering the full interview protocol across building and holdout questions.">
         <input type="hidden" name="case" value="{html.escape(case_name)}">
         <button type="submit">Run AI Interview</button>
       </form>
-      <form class="inline-form" method="post" action="/evaluate" data-loading-title="Running Judge" data-loading-message="Comparing the human interview PDF with the AI persona interview output using the qualitative rubric.">
+      <form class="inline-form" method="post" action="/judge" data-loading-title="Running Judge" data-loading-message="Comparing the building subset and holdout human answers with the full AI interview using 40/60 weighting.">
         <input type="hidden" name="case" value="{html.escape(case_name)}">
         <button type="submit">Run Judge</button>
       </form>
-      <form class="inline-form" method="post" action="/benchmark" data-loading-title="Running Task Benchmark" data-loading-message="Generating and scoring matched decision tasks for the human case and AI persona.">
+      <form class="inline-form" method="post" action="/benchmark" data-loading-title="Running Task Benchmark" data-loading-message="Generating and scoring split-labeled decision tasks for the human case and the building-only AI persona.">
         <input type="hidden" name="case" value="{html.escape(case_name)}">
         <button type="submit">Run Task Benchmark</button>
       </form>
-      <form class="inline-form" method="post" action="/stability" data-loading-title="Running Stability Test" data-loading-message="Repeating the same task set to see whether the AI persona keeps stable decisions.">
+      <form class="inline-form" method="post" action="/stability" data-loading-title="Running Stability Test" data-loading-message="Repeating the same split-labeled task set to see whether the AI persona keeps stable decisions, with holdout weighted more heavily.">
         <input type="hidden" name="case" value="{html.escape(case_name)}">
         <button type="submit">Run Stability Test</button>
       </form>
@@ -711,12 +838,13 @@ def render_case_content(case: Path) -> str:
     <nav class="section-nav" aria-label="Case sections">
       <a href="#evaluation-suite">Evaluation Suite</a>
       <a href="#overall-evaluation">Overall</a>
+      <a href="#evaluation-split">Interview Split</a>
       <a href="#persona-card">Persona Card</a>
       <a href="#simulation-prompt">Simulation Prompt</a>
       <a href="#schema">Schema</a>
       <a href="#ai-interview-transcript">Interview Transcript</a>
       {"<a href='#ai-interview-summary'>Interview Summary</a>" if has_interview_result(case) else ""}
-      <a href="#evaluation-report">Judge</a>
+      <a href="#judge-report">Judge</a>
       <a href="#task-benchmark">Benchmark</a>
       <a href="#stability-test">Stability</a>
     </nav>
@@ -724,6 +852,22 @@ def render_case_content(case: Path) -> str:
     {render_evaluation_suite(case)}
     {job_panel}
     {combined_panel}
+    <section class="panel" id="evaluation-split">
+      <h2>Interview Split</h2>
+      <div class="markdown">{split_md}</div>
+      <details>
+        <summary>View split JSON</summary>
+        <pre><code>{split_json}</code></pre>
+      </details>
+    </section>
+    <section class="panel" id="building-ground-truth">
+      <h2>Persona Building Ground Truth</h2>
+      <div class="markdown">{building_md}</div>
+    </section>
+    <section class="panel" id="holdout-ground-truth">
+      <h2>Holdout Evaluation Ground Truth</h2>
+      <div class="markdown">{holdout_md}</div>
+    </section>
     <section class="panel" id="persona-card">
       <h2>Persona Card</h2>
       <div class="markdown">{persona}</div>
@@ -765,8 +909,8 @@ def render_page(selected: str | None = None, error: str | None = None, notice: s
             mini_badge = "stability tested"
         elif has_benchmark_result(case):
             mini_badge = "benchmarked"
-        elif has_evaluation_result(case):
-            mini_badge = "evaluated"
+        elif has_judge_result(case):
+            mini_badge = "judged"
         elif has_interview_result(case):
             mini_badge = "interviewed"
         else:
@@ -789,7 +933,7 @@ def render_page(selected: str | None = None, error: str | None = None, notice: s
     refresh_meta = "<meta http-equiv='refresh' content='5'>" if selected_case and is_job_running(selected_case) else ""
     initial_running = bool(selected_case and is_job_running(selected_case))
     initial_loading_title = "Full Evaluation Running"
-    initial_loading_message = "AI Interview -> Judge -> Task Benchmark -> Stability -> Overall. Partial results appear as each step finishes."
+    initial_loading_message = "AI Interview -> Judge -> Task Benchmark -> Stability -> Overall. Building and holdout results appear as each step finishes."
 
     page = f"""<!doctype html>
     <html lang="en">
@@ -905,6 +1049,23 @@ def render_page(selected: str | None = None, error: str | None = None, notice: s
           background: #2563eb;
         }}
         .badges, .links {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+        .file-links {{
+          flex-basis: 100%;
+          margin: 0;
+          border: 1px solid #deded8;
+          border-radius: 8px;
+          background: #fbfbfa;
+          padding: 10px 12px;
+        }}
+        .file-links summary {{
+          cursor: pointer;
+          color: #4b5563;
+          font-size: 13px;
+          margin: 0;
+        }}
+        .file-links .links {{
+          margin-top: 12px;
+        }}
         .section-nav {{
           position: sticky;
           top: 0;
@@ -1273,14 +1434,14 @@ def render_page(selected: str | None = None, error: str | None = None, notice: s
       <div class="app">
         <aside>
           <h1>AI Persona Evaluation Lab</h1>
-          <p>Upload an interview PDF, generate persona artifacts, then run the fixed Block 1-6 AI interview.</p>
+          <p>Upload an interview PDF, build the persona from the fixed building subset, then evaluate it on the full interview with heavier weight on holdout questions.</p>
           {warning}
           {error_html}
           {notice_html}
-          <form class="upload-form" method="post" action="/upload" enctype="multipart/form-data" data-loading-title="Generating Persona" data-loading-message="Extracting the PDF and generating the structured schema, persona card, and simulation prompt.">
+          <form class="upload-form" method="post" action="/upload" enctype="multipart/form-data" data-loading-title="Generating Persona" data-loading-message="Extracting the PDF, splitting building vs holdout questions, and generating the schema, persona card, and simulation prompt.">
             <input type="file" name="pdf" accept="application/pdf,.pdf" required>
             <button type="submit">Generate Persona</button>
-            <div class="hint">Generation waits for the API response. It can take a minute.</div>
+            <div class="hint">Generation now includes question extraction plus persona creation, so it can take a bit longer.</div>
           </form>
           <div class="history-title">History</div>
           <nav class="history">{''.join(history_items) or '<p>No history yet.</p>'}</nav>
@@ -1364,9 +1525,9 @@ class PersonaHandler(BaseHTTPRequestHandler):
                 selected = self.handle_interview()
                 self.redirect(selected, notice="AI interview completed.")
                 return
-            if parsed.path == "/evaluate":
-                selected = self.handle_evaluate()
-                self.redirect(selected, notice="Evaluation completed.")
+            if parsed.path in ("/judge", "/evaluate"):
+                selected = self.handle_judge()
+                self.redirect(selected, notice="Judge completed.")
                 return
             if parsed.path == "/benchmark":
                 selected = self.handle_benchmark()
@@ -1436,7 +1597,7 @@ class PersonaHandler(BaseHTTPRequestHandler):
         run_ai_interview(case_dir, current_model())
         return case_dir.name
 
-    def handle_evaluate(self) -> str:
+    def handle_judge(self) -> str:
         ensure_api_key()
         length = int(self.headers.get("Content-Length", "0") or "0")
         body = self.rfile.read(length).decode("utf-8")
@@ -1447,8 +1608,8 @@ class PersonaHandler(BaseHTTPRequestHandler):
         if not has_core_result(case_dir):
             raise RuntimeError("This case does not have persona files yet.")
         if not has_interview_result(case_dir):
-            raise RuntimeError("Run AI Interview before evaluation.")
-        run_evaluation(case_dir, current_model())
+            raise RuntimeError("Run AI Interview before Judge.")
+        run_judge(case_dir, current_model())
         if has_benchmark_result(case_dir) and has_stability_result(case_dir):
             compute_combined(case_dir)
         return case_dir.name
@@ -1464,7 +1625,7 @@ class PersonaHandler(BaseHTTPRequestHandler):
         if not has_core_result(case_dir):
             raise RuntimeError("This case does not have persona files yet.")
         run_task_benchmark(case_dir, current_model())
-        if has_evaluation_result(case_dir) and has_stability_result(case_dir):
+        if has_judge_result(case_dir) and has_stability_result(case_dir):
             compute_combined(case_dir)
         return case_dir.name
 
@@ -1479,7 +1640,7 @@ class PersonaHandler(BaseHTTPRequestHandler):
         if not has_core_result(case_dir):
             raise RuntimeError("This case does not have persona files yet.")
         run_stability_test(case_dir, current_model())
-        if has_evaluation_result(case_dir) and has_benchmark_result(case_dir):
+        if has_judge_result(case_dir) and has_benchmark_result(case_dir):
             compute_combined(case_dir)
         return case_dir.name
 
@@ -1542,7 +1703,7 @@ def start_full_evaluation_job(case_dir: Path, model: str) -> None:
         "current_step": "starting",
         "steps": {
             "ai_interview": "pending" if not has_interview_result(case_dir) else "done",
-            "qualitative_judge": "pending" if not has_evaluation_result(case_dir) else "done",
+            "judge": "pending" if not has_judge_result(case_dir) else "done",
             "task_benchmark": "pending" if not has_benchmark_result(case_dir) else "done",
             "stability_test": "pending" if not has_stability_result(case_dir) else "done",
             "overall": "pending",
@@ -1573,15 +1734,42 @@ def run_full_evaluation_job(case_dir: Path, model: str, case_key: str) -> None:
             run_ai_interview(case_dir, model)
             update_step(case_dir, "ai_interview", "done")
 
-        if not has_evaluation_result(case_dir):
-            update_step(case_dir, "qualitative_judge", "running")
-            run_evaluation(case_dir, model)
-            update_step(case_dir, "qualitative_judge", "done")
+        parallel_errors: list[Exception] = []
+        workers: list[threading.Thread] = []
+
+        if not has_judge_result(case_dir):
+            def judge_worker() -> None:
+                try:
+                    update_step(case_dir, "judge", "running")
+                    run_judge(case_dir, model)
+                    update_step(case_dir, "judge", "done")
+                except Exception as exc:  # pragma: no cover - background thread path
+                    parallel_errors.append(exc)
+
+            workers.append(threading.Thread(target=judge_worker, daemon=True))
+        else:
+            update_step(case_dir, "judge", "done")
 
         if not has_benchmark_result(case_dir):
-            update_step(case_dir, "task_benchmark", "running")
-            run_task_benchmark(case_dir, model)
+            def benchmark_worker() -> None:
+                try:
+                    update_step(case_dir, "task_benchmark", "running")
+                    run_task_benchmark(case_dir, model)
+                    update_step(case_dir, "task_benchmark", "done")
+                except Exception as exc:  # pragma: no cover - background thread path
+                    parallel_errors.append(exc)
+
+            workers.append(threading.Thread(target=benchmark_worker, daemon=True))
+        else:
             update_step(case_dir, "task_benchmark", "done")
+
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+
+        if parallel_errors:
+            raise parallel_errors[0]
 
         if not has_stability_result(case_dir):
             update_step(case_dir, "stability_test", "running")
