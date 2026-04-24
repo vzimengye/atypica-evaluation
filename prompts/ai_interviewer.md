@@ -29,7 +29,7 @@ Interview context:
 Return ONLY valid JSON with this exact structure:
 
 {
-  "transcript_markdown": "# AI Persona Interview Transcript\n...",
+  "transcript_markdown": "Full readable markdown transcript with actual content. Do not return placeholders like '...' or a title only.",
   "question_answers": [
     {
       "question_id": "",
@@ -58,5 +58,5 @@ Return ONLY valid JSON with this exact structure:
     "language_markers": [],
     "confidence_flags": []
   },
-  "summary_markdown": "# AI Interview Summary\n..."
+  "summary_markdown": "Full readable markdown summary with actual content. Do not return placeholders like '...' or a title only."
 }
